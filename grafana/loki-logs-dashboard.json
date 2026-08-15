@@ -727,7 +727,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Kubernetes \u2014 Application Logs",
+  "title": "Grafana Loki",
   "uid": "k8s-app-logs-v2",
   "version": 2,
   "weekStart": ""
