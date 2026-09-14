@@ -52,11 +52,9 @@ CNI_PLUGIN="cni" # cilium, calico, or cni
 DISABLE_KUBE_PROXY="false" # whether to remove kube-proxy (true or false); only safe if your CNI replaces its functionality (e.g. Cilium kube-proxy replacement)
 AUTO_RENEW_CERTIFICATES="true" # kubeadm cert auto-renewal via systemd timer
 ENABLE_NODELOCALDNS="true" # whether to enable the nodelocaldns addon (true or false)
-INSTALL_INGRESS_CONTROLLER="false" # whether to install NGNIX ingress controller
 
 KUBESPRAY_VERSION=$(get_latest_release "kubernetes-sigs/kubespray")
 PYTHON_ENV_DIR="${KUBESPRAY_SRC_DIR}/python-venv"
-HELM_VERSION=$(get_latest_release "helm/helm")
 
 # Step 1: Enable passwordless sudo and ensure connection on target servers with same username (a prompt for password might appear)
 init_connections () {
@@ -217,64 +215,17 @@ install_kubernetes () {
   sudo cp -ra /root/.kube ~/.kube && sudo chown -R $UID:$UID ~/.kube
 }
 
-# Step 6: Install latest version of Helm and Nginx ingress controller
-install_ingress_controller () {
-  # Downloads latest version of Helm
-  cd /tmp
-  curl -LO https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz
-  tar -zxvf helm-${HELM_VERSION}-linux-amd64.tar.gz
-  sudo mv linux-amd64/helm /usr/local/bin/helm
-  cd
-  cat << EOF > nginx-controller-values.yml
-controller:
-  kind: daemonset
-  hostNetwork: true
-  # enableCertManager: true
-  # enableCustomResources: true
-  # enableTLSPassthrough: true
-  # tlsPassThroughPort: 443
-  service:
-    create: false
-  config:
-    entries:
-      worker-processes: "8"
-      worker-rlimit-nofile: "523264"
-      worker-connections: "163840"
-      proxy-connect-timeout: "120"
-      proxy-read-timeout: "120"
-      proxy-send-timeout: "120"
-  initContainers:
-  - name: "sysctl"
-    image: "alpine"
-    securityContext:
-      privileged: true
-    command: ["sh", "-c", "sysctl -w net.core.somaxconn=327680; sysctl -w net.ipv4.ip_local_port_range='1024 65000'"]
-EOF
-  # Install Ingress Controller
-  sudo su -c "kubectl create namespace nginx-ingress"
-  sudo su -c "helm upgrade -i -n nginx-ingress nginx-ingress oci://ghcr.io/nginx/charts/nginx-ingress -f nginx-controller-values.yml"
-}
-
 # Main function
 main() {
-  echo -e "\n${BLUE}${BOLD}█▒▒▒▒▒ INIT CONNECTIONS ▒▒▒▒▒█${RESET}\n"
+  echo -e "\n${BLUE}${BOLD}█▒▒▒▒ INIT CONNECTIONS ▒▒▒▒█${RESET}\n"
   init_connections
-  echo -e "\n${BLUE}${BOLD}██▒▒▒▒ DOWNLOADING DEPENDENCIES ▒▒▒▒██${RESET}\n"
+  echo -e "\n${BLUE}${BOLD}██▒▒▒ DOWNLOADING DEPENDENCIES ▒▒▒██${RESET}\n"
   download_dependencies
-  echo -e "\n${BLUE}${BOLD}███▒▒▒ SETTING UP KUBESPRAY ▒▒▒███${RESET}\n"
+  echo -e "\n${BLUE}${BOLD}███▒▒ SETTING UP KUBESPRAY ▒▒███${RESET}\n"
   setup_kubespray
-  echo -e "\n${BLUE}${BOLD}████▒▒ INSTALLING KUBERNETES ▒▒████${RESET}\n"
+  echo -e "\n${BLUE}${BOLD}████▒ INSTALLING KUBERNETES ▒████${RESET}\n"
   install_kubernetes
-  if [[ "${INSTALL_INGRESS_CONTROLLER}" == "true" ]]; then
-    echo -e "\n${BLUE}${BOLD}█████▒ INSTALLING INGESS CONTROLLER ▒█████${RESET}\n"
-    install_ingress_controller
-  elif [[ "${INSTALL_INGRESS_CONTROLLER}" == "false" ]]; then
-    echo -e "${YELLOW}Skipping Nginx ingress controller installation (INSTALL_INGRESS_CONTROLLER=false)${RESET}"
-  else
-    echo -e "${RED}${BOLD}Invalid INSTALL_INGRESS_CONTROLLER: ${INSTALL_INGRESS_CONTROLLER}. Must be 'true' or 'false'.${RESET}"
-    exit 1
-  fi
-  echo -e "\n${BLUE}${BOLD}██████ KUBERNETES HAS BEEN INSTALLED SUCCESSFULLY ██████${RESET}\n"
+  echo -e "\n${BLUE}${BOLD}█████ KUBERNETES HAS BEEN INSTALLED SUCCESSFULLY █████${RESET}\n"
 }
 
 main
