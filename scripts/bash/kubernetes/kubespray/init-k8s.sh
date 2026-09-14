@@ -37,19 +37,23 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Configs
 BASE_DIR=$(readlink -f $(dirname ${0}))
 SSH_PORT="22"
-CLUSTER_NODES_IPS=(192.168.100.33) # CHANGE THIS
 KUBESPRAY_SRC_DIR="/usr/local/src/kubespray"
-KUBESPRAY_INV_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/hosts.ini
+KUBESPRAY_INV_DIR="${KUBESPRAY_SRC_DIR}/inventory/mycluster"
+KUBESPRAY_INV_FILE="${KUBESPRAY_INV_DIR}/hosts.ini"
+ETCD_CONFIG_FILE="${KUBESPRAY_INV_DIR}/group_vars/all/etcd.yml"
+CLUSTER_CONFIG_FILE="${KUBESPRAY_INV_DIR}/group_vars/k8s_cluster/k8s-cluster.yml"
 ETCD_MODE="host" # Either host or kubeadm (static pod)
-ETCD_CONFIG_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/all/etcd.yml
+
+# Configs
+CLUSTER_NODES_IPS=(192.168.100.33) # CHANGE THIS
 CNI_PLUGIN="cni" # cilium, calico, or cni
-CLUSTER_CONFIG_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml
 DISABLE_KUBE_PROXY="false" # whether to remove kube-proxy (true or false); only safe if your CNI replaces its functionality (e.g. Cilium kube-proxy replacement)
 AUTO_RENEW_CERTIFICATES="true" # kubeadm cert auto-renewal via systemd timer
+ENABLE_NODELOCALDNS="true" # whether to enable the nodelocaldns addon (true or false)
 INSTALL_INGRESS_CONTROLLER="false" # whether to install NGNIX ingress controller
+
 KUBESPRAY_VERSION=$(get_latest_release "kubernetes-sigs/kubespray")
 PYTHON_ENV_DIR="${KUBESPRAY_SRC_DIR}/python-venv"
 HELM_VERSION=$(get_latest_release "helm/helm")
@@ -119,7 +123,7 @@ download_dependencies () {
 # Step 3: Prepare Kubespray
 setup_kubespray () {
   # Create cluster directory
-  cp -rfp "${KUBESPRAY_SRC_DIR}"/inventory/sample "${KUBESPRAY_SRC_DIR}"/inventory/mycluster
+  cp -rfp "${KUBESPRAY_SRC_DIR}"/inventory/sample "${KUBESPRAY_INV_DIR}"
   local nodes_count=$(echo "${#CLUSTER_NODES_IPS[@]}")
   # Prepare Ansible inventory file
   echo -e "${BLUE}Preparing the inventory file for ${nodes_count} control plane nodes${RESET}"
@@ -175,9 +179,17 @@ setup_kubespray () {
       exit 1
   fi
 
+  # nodelocaldns config: enable or disable the node-local DNS cache addon
+  if [[ "${ENABLE_NODELOCALDNS}" == "true" || "${ENABLE_NODELOCALDNS}" == "false" ]]; then
+      set_yaml_var "enable_nodelocaldns" "${ENABLE_NODELOCALDNS}" "${CLUSTER_CONFIG_FILE}"
+  else
+      echo "Invalid ENABLE_NODELOCALDNS: ${ENABLE_NODELOCALDNS}. Must be 'true' or 'false'."
+      exit 1
+  fi
+
   # If it's a single-node cluster with Cilium installed
   if [ "${#CLUSTER_NODES_IPS[@]}" -eq 1 ] && [ "$CNI_PLUGIN" = "cilium" ]; then
-    echo "cilium_operator_replicas: 1" >> "${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/k8s_cluster/k8s-net-cilium.yml
+    echo "cilium_operator_replicas: 1" >> "${KUBESPRAY_INV_DIR}"/group_vars/k8s_cluster/k8s-net-cilium.yml
   fi
   echo -e "[defaults]\nroles_path = "${KUBESPRAY_SRC_DIR}"/roles" > ~/.ansible.cfg
 }
