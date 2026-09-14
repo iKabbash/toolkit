@@ -48,10 +48,8 @@ ETCD_MODE="host" # Either host or kubeadm (static pod)
 
 # Configs
 CLUSTER_NODES_IPS=(192.168.100.33) # CHANGE THIS
-CNI_PLUGIN="cni" # cilium, calico, or cni
-DISABLE_KUBE_PROXY="false" # whether to remove kube-proxy (true or false); only safe if your CNI replaces its functionality (e.g. Cilium kube-proxy replacement)
+CNI_PLUGIN="cni" # calico or cni
 AUTO_RENEW_CERTIFICATES="true" # kubeadm cert auto-renewal via systemd timer
-ENABLE_NODELOCALDNS="true" # whether to enable the nodelocaldns addon (true or false)
 
 KUBESPRAY_VERSION=$(get_latest_release "kubernetes-sigs/kubespray")
 PYTHON_ENV_DIR="${KUBESPRAY_SRC_DIR}/python-venv"
@@ -149,23 +147,21 @@ setup_kubespray () {
       exit 1
   fi
 
-  # cni config
-  if [[ "${CNI_PLUGIN}" == "cni" || "${CNI_PLUGIN}" == "calico" || "${CNI_PLUGIN}" == "cilium" ]]; then
+  # cni config: kubespray won't install a CNI, so kube-proxy and nodelocaldns are disabled
+  # Bring your own CNI (e.g. Cilium)
+  if [[ "${CNI_PLUGIN}" == "cni" || "${CNI_PLUGIN}" == "calico" ]]; then
       sed -i "s/^kube_network_plugin: .*/kube_network_plugin: ${CNI_PLUGIN}/" "${CLUSTER_CONFIG_FILE}"
       sed -i "s/^kube_owner: .*/kube_owner: root/" "${CLUSTER_CONFIG_FILE}"
-  else
-      echo "Invalid CNI_PLUGIN: ${CNI_PLUGIN}. Must be 'cni', 'calico' or 'cilium'."
-      exit 1
-  fi
-
-  # kube-proxy config: remove it or keep it, based on DISABLE_KUBE_PROXY
-  if [[ "${DISABLE_KUBE_PROXY}" == "true" || "${DISABLE_KUBE_PROXY}" == "false" ]]; then
-      set_yaml_var "kube_proxy_remove" "${DISABLE_KUBE_PROXY}" "${CLUSTER_CONFIG_FILE}"
-      if [[ "${DISABLE_KUBE_PROXY}" == "true" && "${CNI_PLUGIN}" != "cilium" ]]; then
-          echo -e "${YELLOW}Warning: DISABLE_KUBE_PROXY=true but CNI_PLUGIN=${CNI_PLUGIN}. Make sure this CNI is configured to replace kube-proxy's functionality, or the cluster will lose service routing.${RESET}"
+      if [[ "${CNI_PLUGIN}" == "cni" ]]; then
+          set_yaml_var "kube_proxy_remove" "true" "${CLUSTER_CONFIG_FILE}"
+          set_yaml_var "enable_nodelocaldns" "false" "${CLUSTER_CONFIG_FILE}"
+          echo -e "${YELLOW}CNI_PLUGIN=cni: kube-proxy and nodelocaldns are disabled. Make sure the CNI you install separately is configured to replace their functionality (e.g. Cilium's kubeProxyReplacement).${RESET}"
+      else
+          set_yaml_var "kube_proxy_remove" "false" "${CLUSTER_CONFIG_FILE}"
+          set_yaml_var "enable_nodelocaldns" "true" "${CLUSTER_CONFIG_FILE}"
       fi
   else
-      echo "Invalid DISABLE_KUBE_PROXY: ${DISABLE_KUBE_PROXY}. Must be 'true' or 'false'."
+      echo "Invalid CNI_PLUGIN: ${CNI_PLUGIN}. Must be 'cni' or 'calico'."
       exit 1
   fi
 
@@ -177,22 +173,10 @@ setup_kubespray () {
       exit 1
   fi
 
-  # nodelocaldns config: enable or disable the node-local DNS cache addon
-  if [[ "${ENABLE_NODELOCALDNS}" == "true" || "${ENABLE_NODELOCALDNS}" == "false" ]]; then
-      set_yaml_var "enable_nodelocaldns" "${ENABLE_NODELOCALDNS}" "${CLUSTER_CONFIG_FILE}"
-  else
-      echo "Invalid ENABLE_NODELOCALDNS: ${ENABLE_NODELOCALDNS}. Must be 'true' or 'false'."
-      exit 1
-  fi
-
-  # If it's a single-node cluster with Cilium installed
-  if [ "${#CLUSTER_NODES_IPS[@]}" -eq 1 ] && [ "$CNI_PLUGIN" = "cilium" ]; then
-    echo "cilium_operator_replicas: 1" >> "${KUBESPRAY_INV_DIR}"/group_vars/k8s_cluster/k8s-net-cilium.yml
-  fi
   echo -e "[defaults]\nroles_path = "${KUBESPRAY_SRC_DIR}"/roles" > ~/.ansible.cfg
 }
 
-# Step 5: Install Kubernetes
+# Step 4: Install Kubernetes
 install_kubernetes () {
   # Install kubernetes cluster using Ansible Playbook
   ansible-playbook -i "${KUBESPRAY_INV_FILE}" -u ${USER} --become --become-user=root "${KUBESPRAY_SRC_DIR}"/cluster.yml
