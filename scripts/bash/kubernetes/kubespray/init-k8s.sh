@@ -18,6 +18,18 @@ get_latest_release () {
   git ls-remote --tags https://github.com/"${repo_path}".git | awk -F'/' '{print $NF}' | grep -v '{}' | grep -E '^[vV]?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1
 }
 
+# Helper function in case there are keys that aren't already present
+set_yaml_var () {
+  local key=$1
+  local value=$2
+  local file=$3
+  if grep -qE "^${key}:" "${file}"; then
+    sed -i "s/^${key}:.*/${key}: ${value}/" "${file}"
+  else
+    echo "${key}: ${value}" >> "${file}"
+  fi
+}
+
 # Define colors
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
@@ -25,16 +37,19 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Env vars
+# Configs
 BASE_DIR=$(readlink -f $(dirname ${0}))
 SSH_PORT="22"
-CLUSTER_NODES_IPS=(192.168.1.101 192.168.1.104) # CHANGE THIS
+CLUSTER_NODES_IPS=(192.168.100.33) # CHANGE THIS
 KUBESPRAY_SRC_DIR="/usr/local/src/kubespray"
 KUBESPRAY_INV_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/hosts.ini
 ETCD_MODE="host" # Either host or kubeadm (static pod)
 ETCD_CONFIG_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/all/etcd.yml
-CNI_PLUGIN="cilium" # cilium, calico, or cni
-CNI_CONFIG_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml
+CNI_PLUGIN="cni" # cilium, calico, or cni
+CLUSTER_CONFIG_FILE="${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml
+DISABLE_KUBE_PROXY="false" # whether to remove kube-proxy (true or false); only safe if your CNI replaces its functionality (e.g. Cilium kube-proxy replacement)
+AUTO_RENEW_CERTIFICATES="true" # kubeadm cert auto-renewal via systemd timer
+INSTALL_INGRESS_CONTROLLER="false" # whether to install NGNIX ingress controller
 KUBESPRAY_VERSION=$(get_latest_release "kubernetes-sigs/kubespray")
 PYTHON_ENV_DIR="${KUBESPRAY_SRC_DIR}/python-venv"
 HELM_VERSION=$(get_latest_release "helm/helm")
@@ -76,17 +91,14 @@ init_connections () {
   done
 }
 
-# Step 2: Install dependencies and NTP on all servers and disable swap and ufw
+# Step 2: Install dependencies all servers and disable swap
 download_dependencies () {
   # Check https://discuss.kubernetes.io/t/swap-off-why-is-it-necessary/6879 if you're not sure why
   for CLUSTER_NODE_IP in ${CLUSTER_NODES_IPS[@]}; do
     ssh -t ${USER}@${CLUSTER_NODE_IP} "sudo apt-get update && \
     sudo apt-get upgrade -y && \
-    sudo apt-get install git python3 net-tools ntp python3-pip python3-venv -y && \
-    sudo systemctl enable ntp || true && \
-    sudo systemctl start ntp && \
-    sudo swapoff -a && \
-    sudo ufw disable"
+    sudo apt-get install git python3 net-tools python3-pip python3-venv iputils-ping -y && \
+    sudo swapoff -a"
   done
   # Check if repo is already cloned or not
   if [ -d "${KUBESPRAY_SRC_DIR}" ]; then
@@ -111,7 +123,7 @@ setup_kubespray () {
   local nodes_count=$(echo "${#CLUSTER_NODES_IPS[@]}")
   # Prepare Ansible inventory file
   echo -e "${BLUE}Preparing the inventory file for ${nodes_count} control plane nodes${RESET}"
-  # [kube_control_plane] section
+
   echo "[kube_control_plane]" >> "${KUBESPRAY_INV_FILE}"
   counter=1
   for ip in "${CLUSTER_NODES_IPS[@]}"; do
@@ -119,13 +131,14 @@ setup_kubespray () {
       ((counter++))
   done
   echo -e "[etcd:children]\nkube_control_plane\n" >> "${KUBESPRAY_INV_FILE}"
-  # [kube_node] section
+
   echo "[kube_node]" >> "${KUBESPRAY_INV_FILE}"
   counter=1
   for ip in "${CLUSTER_NODES_IPS[@]}"; do
       echo -e "node${counter} ansible_host=${ip} ip=${ip}" >> "${KUBESPRAY_INV_FILE}"
       ((counter++))
   done
+
   # etcd config
   if [[ "${ETCD_MODE}" == "host" || "${ETCD_MODE}" == "kubeadm" ]]; then
     sed -i "s/^etcd_deployment_type: .*/etcd_deployment_type: ${ETCD_MODE}/" "${ETCD_CONFIG_FILE}"
@@ -133,14 +146,35 @@ setup_kubespray () {
       echo "Invalid ETCD_MODE: ${ETCD_MODE}. Must be 'host' or 'kubeadm'."
       exit 1
   fi
+
   # cni config
   if [[ "${CNI_PLUGIN}" == "cni" || "${CNI_PLUGIN}" == "calico" || "${CNI_PLUGIN}" == "cilium" ]]; then
-      sed -i "s/^kube_network_plugin: .*/kube_network_plugin: ${CNI_PLUGIN}/" "${CNI_CONFIG_FILE}"
-      sed -i "s/^kube_owner: .*/kube_owner: root/" "${CNI_CONFIG_FILE}"
+      sed -i "s/^kube_network_plugin: .*/kube_network_plugin: ${CNI_PLUGIN}/" "${CLUSTER_CONFIG_FILE}"
+      sed -i "s/^kube_owner: .*/kube_owner: root/" "${CLUSTER_CONFIG_FILE}"
   else
       echo "Invalid CNI_PLUGIN: ${CNI_PLUGIN}. Must be 'cni', 'calico' or 'cilium'."
       exit 1
   fi
+
+  # kube-proxy config: remove it or keep it, based on DISABLE_KUBE_PROXY
+  if [[ "${DISABLE_KUBE_PROXY}" == "true" || "${DISABLE_KUBE_PROXY}" == "false" ]]; then
+      set_yaml_var "kube_proxy_remove" "${DISABLE_KUBE_PROXY}" "${CLUSTER_CONFIG_FILE}"
+      if [[ "${DISABLE_KUBE_PROXY}" == "true" && "${CNI_PLUGIN}" != "cilium" ]]; then
+          echo -e "${YELLOW}Warning: DISABLE_KUBE_PROXY=true but CNI_PLUGIN=${CNI_PLUGIN}. Make sure this CNI is configured to replace kube-proxy's functionality, or the cluster will lose service routing.${RESET}"
+      fi
+  else
+      echo "Invalid DISABLE_KUBE_PROXY: ${DISABLE_KUBE_PROXY}. Must be 'true' or 'false'."
+      exit 1
+  fi
+
+  # kubeadm cert auto-renewal config
+  if [[ "${AUTO_RENEW_CERTIFICATES}" == "true" || "${AUTO_RENEW_CERTIFICATES}" == "false" ]]; then
+      sed -i "s/^auto_renew_certificates: .*/auto_renew_certificates: ${AUTO_RENEW_CERTIFICATES}/" "${CLUSTER_CONFIG_FILE}"
+  else
+      echo "Invalid AUTO_RENEW_CERTIFICATES: ${AUTO_RENEW_CERTIFICATES}. Must be 'true' or 'false'."
+      exit 1
+  fi
+
   # If it's a single-node cluster with Cilium installed
   if [ "${#CLUSTER_NODES_IPS[@]}" -eq 1 ] && [ "$CNI_PLUGIN" = "cilium" ]; then
     echo "cilium_operator_replicas: 1" >> "${KUBESPRAY_SRC_DIR}"/inventory/mycluster/group_vars/k8s_cluster/k8s-net-cilium.yml
@@ -219,8 +253,15 @@ main() {
   setup_kubespray
   echo -e "\n${BLUE}${BOLD}████▒▒ INSTALLING KUBERNETES ▒▒████${RESET}\n"
   install_kubernetes
-  echo -e "\n${BLUE}${BOLD}█████▒ INSTALLING INGESS CONTROLLER ▒█████${RESET}\n"
-  install_ingress_controller
+  if [[ "${INSTALL_INGRESS_CONTROLLER}" == "true" ]]; then
+    echo -e "\n${BLUE}${BOLD}█████▒ INSTALLING INGESS CONTROLLER ▒█████${RESET}\n"
+    install_ingress_controller
+  elif [[ "${INSTALL_INGRESS_CONTROLLER}" == "false" ]]; then
+    echo -e "${YELLOW}Skipping Nginx ingress controller installation (INSTALL_INGRESS_CONTROLLER=false)${RESET}"
+  else
+    echo -e "${RED}${BOLD}Invalid INSTALL_INGRESS_CONTROLLER: ${INSTALL_INGRESS_CONTROLLER}. Must be 'true' or 'false'.${RESET}"
+    exit 1
+  fi
   echo -e "\n${BLUE}${BOLD}██████ KUBERNETES HAS BEEN INSTALLED SUCCESSFULLY ██████${RESET}\n"
 }
 
