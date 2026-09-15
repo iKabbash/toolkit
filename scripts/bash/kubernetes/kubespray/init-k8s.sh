@@ -50,6 +50,11 @@ ETCD_MODE="host" # Either host or kubeadm (static pod)
 CLUSTER_NODES_IPS=(192.168.100.33) # CHANGE THIS
 CNI_PLUGIN="cni" # calico or cni
 AUTO_RENEW_CERTIFICATES="true" # kubeadm cert auto-renewal via systemd timer
+KUBELET_IMAGE_MAXIMUM_GC_AGE="720h" # kubelet arg, leave empty ("") to skip
+# Pod Security Admission default applied to every namespace at every level (enforce/audit/warn), leave empty ("") to skip
+PSA_DEFAULT_LEVEL="restricted"
+# Namespaces to be exempted from the PSA (kube-system is always exempted); e.g. (cert-manager ingress-nginx)
+PSA_EXEMPT_NAMESPACES=(monitoring)
 
 KUBESPRAY_VERSION=$(get_latest_release "kubernetes-sigs/kubespray")
 PYTHON_ENV_DIR="${KUBESPRAY_SRC_DIR}/python-venv"
@@ -98,7 +103,13 @@ download_dependencies () {
     ssh -t ${USER}@${CLUSTER_NODE_IP} "sudo apt-get update && \
     sudo apt-get upgrade -y && \
     sudo apt-get install git python3 net-tools python3-pip python3-venv iputils-ping -y && \
-    sudo swapoff -a"
+    sudo swapoff -a && \
+    if grep -qE '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then \
+      sudo sed -i.bak -E '/^[^#].*[[:space:]]swap[[:space:]]/s/^/#/' /etc/fstab && \
+      echo 'Commented out swap entries in /etc/fstab'; \
+    else \
+      echo 'No active swap entries found in /etc/fstab'; \
+    fi"
   done
   # Check if repo is already cloned or not
   if [ -d "${KUBESPRAY_SRC_DIR}" ]; then
@@ -108,6 +119,7 @@ download_dependencies () {
     cd /usr/local/src && sudo git clone https://github.com/kubernetes-sigs/kubespray.git "${KUBESPRAY_SRC_DIR}"
     sudo chown -R ${USER}:${USER} "${KUBESPRAY_SRC_DIR}"
     cd ${KUBESPRAY_SRC_DIR}
+    sleep 5
     git checkout tags/${KUBESPRAY_VERSION}
     cd ..
     sudo chown -R ${USER}:${USER} "${KUBESPRAY_SRC_DIR}"
@@ -172,6 +184,30 @@ setup_kubespray () {
       echo "Invalid AUTO_RENEW_CERTIFICATES: ${AUTO_RENEW_CERTIFICATES}. Must be 'true' or 'false'."
       exit 1
   fi
+
+  # kubelet imageMaximumGCAge config (optional, only added if KUBELET_IMAGE_MAXIMUM_GC_AGE is set)
+  if [[ -n "${KUBELET_IMAGE_MAXIMUM_GC_AGE}" ]]; then
+      if ! grep -q "imageMaximumGCAge:" "${CLUSTER_CONFIG_FILE}"; then
+          printf 'kubelet_config_extra_args:\n  imageMaximumGCAge: "%s"\n' "${KUBELET_IMAGE_MAXIMUM_GC_AGE}" >> "${CLUSTER_CONFIG_FILE}"
+      fi
+  fi
+
+  # Pod Security Admission default config (optional, only added if PSA_DEFAULT_LEVEL is set).
+  # enforce/audit/warn all share the same level for simplicity.
+  if [[ -n "${PSA_DEFAULT_LEVEL}" ]]; then
+      set_yaml_var "kube_apiserver_admission_control_config_file" "true" "${CLUSTER_CONFIG_FILE}"
+      set_yaml_var "kube_apiserver_enable_admission_plugins" '["PodSecurity"]' "${CLUSTER_CONFIG_FILE}"
+      set_yaml_var "kube_pod_security_use_default" "true" "${CLUSTER_CONFIG_FILE}"
+      set_yaml_var "kube_pod_security_default_enforce" "${PSA_DEFAULT_LEVEL}" "${CLUSTER_CONFIG_FILE}"
+      set_yaml_var "kube_pod_security_default_audit" "${PSA_DEFAULT_LEVEL}" "${CLUSTER_CONFIG_FILE}"
+      set_yaml_var "kube_pod_security_default_warn" "${PSA_DEFAULT_LEVEL}" "${CLUSTER_CONFIG_FILE}"
+  fi
+
+  # Pod Security Admission exempted namespaces: kube-system is always exempted explicitly
+  local exempt_list
+  exempt_list=$(printf '"%s", ' "kube-system" "${PSA_EXEMPT_NAMESPACES[@]}")
+  exempt_list="[${exempt_list%, }]"
+  set_yaml_var "kube_pod_security_exemptions_namespaces" "${exempt_list}" "${CLUSTER_CONFIG_FILE}"
 
   echo -e "[defaults]\nroles_path = "${KUBESPRAY_SRC_DIR}"/roles" > ~/.ansible.cfg
 }
